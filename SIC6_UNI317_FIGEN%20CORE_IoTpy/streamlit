@@ -1,0 +1,275 @@
+import streamlit as st
+import pandas as pd
+import random
+import requests
+import matplotlib.pyplot as plt
+import plotly.express as px
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.linear_model import LinearRegression
+from sklearn.preprocessing import MultiLabelBinarizer
+from datetime import datetime, date
+
+# ------------------ Konfigurasi Halaman & Styling ------------------
+st.set_page_config(page_title="IoT Monitoring Kompos", layout="wide")
+
+st.markdown("""
+    <style>
+    .main { background-color: white; color: black; }
+    h1, h2, h3, h4 { color: #2E7D32; }
+    .stButton>button {
+        color: white;
+        background-color: #43A047;
+        border-radius: 8px;
+        padding: 0.6em 1.5em;
+    }
+    .stDownloadButton>button {
+        color: white;
+        background-color: #1E88E5;
+    }
+    .stMetric { background-color: #f0f0f0; border-radius: 10px; padding: 10px; }
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 2rem;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# ------------------ Dummy Data & Model Setup ------------------
+UBIDOTS_TOKEN = "BBUS-MxJqqKUKdVBnCtlmnWibz9Gotwwaxo"
+UBIDOTS_URL = "https://industrial.api.ubidots.com/api/v1.6/devices/IOT_ESP32_UNI317/"
+HEADERS = {"X-Auth-Token": UBIDOTS_TOKEN, "Content-Type": "application/json"}
+
+training_data = pd.DataFrame({
+    "Suhu": [40, 50, 55, 45, 60, 42, 48, 53, 58, 38, 41, 47, 52, 59, 43, 49, 56, 44, 51, 57],
+    "Kelembaban": [50, 60, 45, 55, 65, 52, 58, 43, 63, 48, 46, 54, 61, 67, 51, 59, 44, 53, 62, 66],
+    "Waktu Fermentasi": [10, 15, 8, 12, 20, 11, 13, 9, 17, 14, 10, 12, 16, 21, 11, 14, 9, 13, 15, 19],
+    "Bahan": [
+        ["dedaunan"], ["jerami", "sisa makanan"], ["kotoran hewan"], ["sisa makanan"], ["jerami"],
+        ["dedaunan", "kotoran hewan"], ["jerami"], ["sisa makanan"], ["dedaunan"], ["jerami", "kotoran hewan"],
+        ["kotoran hewan", "sisa makanan"], ["dedaunan"], ["jerami"], ["dedaunan", "sisa makanan"], ["kotoran hewan"],
+        ["jerami", "dedaunan"], ["sisa makanan"], ["jerami"], ["dedaunan"], ["kotoran hewan"]
+    ],
+    "Waktu Matang": [30, 25, 35, 28, 20, 32, 26, 33, 22, 29, 31, 27, 24, 23, 34, 26, 30, 28, 21, 33]
+})
+
+if "prediction_history" not in st.session_state:
+    st.session_state.prediction_history = []
+
+# ------------------ Fungsi-Fungsi ------------------
+def send_data(temp, hum):
+    try:
+        requests.post(UBIDOTS_URL, json={"suhu_kompos": temp, "kelembaban_kompos": hum}, headers=HEADERS)
+        st.success("✅ Data berhasil dikirim ke Ubidots!")
+    except Exception as e:
+        st.error(f"❌ Gagal mengirim data: {e}")
+
+def rule_based_prediction(temp, hum):
+    if temp < 35 or temp > 60:
+        return "Risiko Tinggi"
+    elif hum < 40 or hum > 60:
+        return "Risiko Sedang"
+    else:
+        return "Normal"
+
+def train_ml_model(df):
+    if "Label" not in df:
+        df["Label"] = df.apply(lambda row: rule_based_prediction(row["Suhu (°C)"], row["Kelembaban (%)"]), axis=1)
+    X = df[["Suhu (°C)", "Kelembaban (%)"]]
+    y = df["Label"]
+    model = DecisionTreeClassifier().fit(X, y)
+    return model
+
+def predict_with_model(model, suhu, kelembaban):
+    return model.predict([[suhu, kelembaban]])[0]
+
+def train_regression_model(df):
+    mlb = MultiLabelBinarizer()
+    bahan_encoded = mlb.fit_transform(df["Bahan"])
+    X = pd.concat([df[["Suhu", "Kelembaban", "Waktu Fermentasi"]].reset_index(drop=True),
+                   pd.DataFrame(bahan_encoded, columns=mlb.classes_)], axis=1)
+    y = df["Waktu Matang"]
+    return LinearRegression().fit(X, y), mlb
+
+def predict_maturity_time(model, mlb, suhu, kelembaban, waktu_fermentasi, bahan_terpilih):
+    X_input = pd.concat([
+        pd.DataFrame([[suhu, kelembaban, waktu_fermentasi]], columns=["Suhu", "Kelembaban", "Waktu Fermentasi"]),
+        pd.DataFrame(mlb.transform([bahan_terpilih]), columns=mlb.classes_)
+    ], axis=1)
+    return round(model.predict(X_input)[0], 2)
+
+def classify_condition(suhu, kelembaban, gas, durasi):
+    if suhu > 60 or kelembaban > 70 or gas > 1000:
+        return "Buruk"
+    elif suhu < 35 or kelembaban < 40 or gas > 800:
+        return "Perlu Perhatian"
+    else:
+        return "Baik"
+
+# ------------------ UI Layout ------------------
+st.title("🌱 EcoSmart Composting")
+tab1, tab2 = st.tabs(["📡 Monitoring", "ℹ️ Tentang"])
+
+with tab1:
+    st.subheader("📈 Ringkasan Data")
+    st.sidebar.title("🌿 ECOSMART COMPOSTING")
+    
+    st.sidebar.header("📅 Filter Data")
+    start_date = st.sidebar.date_input("Tanggal Mulai", value=date(2025, 1, 1))
+    end_date = st.sidebar.date_input("Tanggal Akhir", value=date.today())
+    suhu_range = st.sidebar.slider("Filter Suhu (°C)", 0, 100, (20, 70))
+    kelembaban_range = st.sidebar.slider("Filter Kelembaban (%)", 0, 100, (20, 70))
+    
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("Made with by **FIGEN CORE**")
+    
+    if st.session_state.prediction_history:
+        df = pd.DataFrame(st.session_state.prediction_history)
+        df["Waktu"] = pd.to_datetime(df["Waktu"])
+        df = df[(df["Waktu"].dt.date >= start_date) & (df["Waktu"].dt.date <= end_date)]
+        df = df[(df["Suhu (°C)"].between(*suhu_range)) & (df["Kelembaban (%)"].between(*kelembaban_range))]
+
+        if len(df) >= 5:
+            model_reg, mlb = train_regression_model(training_data)
+            pred_matang = predict_maturity_time(model_reg, mlb,
+                                                df["Suhu (°C)"].mean(),
+                                                df["Kelembaban (%)"].mean(),
+                                                10, ["jerami"])
+            hari_matang = round(10 + max(pred_matang - 10, 0))
+        else:
+            hari_matang = "-"
+
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Jumlah Data", len(df))
+        col2.metric("Rata-rata Suhu", f"{df['Suhu (°C)'].mean():.2f} °C")
+        col3.metric("Rata-rata Kelembaban", f"{df['Kelembaban (%)'].mean():.2f} %")
+        col4.metric("Estimasi Hari Matang", f"Hari ke-{hari_matang}" if hari_matang != "-" else "-")
+
+        st.markdown("### 📊 Visualisasi dan Distribusi")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1: st.plotly_chart(px.line(df, x="Waktu", y="Suhu (°C)", title="Suhu vs Waktu"), use_container_width=True)
+        with col2: st.plotly_chart(px.line(df, x="Waktu", y="Kelembaban (%)", title="Kelembaban vs Waktu"), use_container_width=True)
+        with col3: st.plotly_chart(px.histogram(df, x="Prediksi Manual", color="Prediksi Manual"), use_container_width=True)
+        with col4: st.plotly_chart(px.histogram(df, x="Prediksi ML", color="Prediksi ML"), use_container_width=True)
+    else:
+        st.info("📭 Belum ada data.")
+
+    st.divider()
+    st.subheader("🧪 Simulasi Sensor Manual")
+    temp = st.slider("🌡️ Suhu Kompos", 0, 100, 40)
+    hum = st.slider("💧 Kelembaban Kompos", 0, 100, 40)
+    durasi = st.number_input("⏳ Durasi Fermentasi (hari)", 0, 100, 15)
+    bahan_terpilih_manual = st.multiselect("🧾 Bahan Kompos", training_data["Bahan"].explode().unique().tolist(), default=["jerami"])
+
+    if st.button("🔍 Jalankan Analisis"):
+        rule_pred = rule_based_prediction(temp, hum)
+        ml_pred = "Belum cukup data"
+        if len(st.session_state.prediction_history) >= 5:
+            model = train_ml_model(pd.DataFrame(st.session_state.prediction_history))
+            ml_pred = predict_with_model(model, temp, hum)
+
+        led_merah = temp < 35 or temp > 60
+        led_kuning = hum < 40 or hum > 60
+        buzzer = led_merah or led_kuning
+
+        col1, col2 = st.columns(2)
+        col1.success(f"Prediksi Manual: **{rule_pred}**")
+        col2.info(f"Prediksi ML: **{ml_pred}**")
+
+        if len(st.session_state.prediction_history) >= 5:
+            model_reg, mlb = train_regression_model(training_data)
+            hasil_prediksi = predict_maturity_time(model_reg, mlb, temp, hum, durasi, bahan_terpilih_manual)
+            sisa_waktu = max(hasil_prediksi - durasi, 0)
+            hari_ke_matang = round(durasi + sisa_waktu)
+            tanggal_estimasi = date.today() + pd.Timedelta(days=sisa_waktu)
+
+            st.markdown(f"📅 Estimasi kompos matang pada **hari ke-{hari_ke_matang}** fermentasi")
+            st.markdown(f"🗓️ Jika mulai hari ini: **{tanggal_estimasi.strftime('%d %B %Y')}**")
+
+        st.session_state.prediction_history.append({
+            "Waktu": datetime.now(), "Suhu (°C)": temp, "Kelembaban (%)": hum,
+            "Durasi Fermentasi (hari)": durasi,
+            "LED Merah": "ON" if led_merah else "OFF",
+            "LED Kuning": "ON" if led_kuning else "OFF",
+            "Buzzer": "ON" if buzzer else "OFF",
+            "Prediksi Manual": rule_pred,
+            "Prediksi ML": ml_pred,
+        })
+
+        send_data(temp, hum)
+        
+    st.markdown("""
+    Sistem **Penjelasan output prediksi** :
+    - Resiko Tinggi:
+        Suhu atau kelembaban berada di luar rentang optimal untuk proses pengomposan. Bisa mengganggu aktivitas mikroba. Cek ulang ventilasi, campur ulang bahan, jaga suhu 35–60°C dan kelembaban 40–60%.
+    - Risiko Sedang:
+        Salah satu parameter sedikit keluar dari batas optimal. Masih bisa fermentasi, tapi tidak maksimal. Pantau lebih sering, lakukan aerasi, atau tambahkan bahan penyeimbang.
+    - Normal:
+        Kondisi suhu dan kelembaban ideal. Fermentasi berjalan optimal. Lanjutkan proses seperti biasa. Pantau secara rutin.
+
+    """)
+
+    st.subheader("📄 Riwayat Prediksi")
+    if st.session_state.prediction_history:
+        df = pd.DataFrame(st.session_state.prediction_history)
+        st.dataframe(df, use_container_width=True)
+        st.download_button("⬇️ Unduh CSV", df.to_csv(index=False), file_name="riwayat_kompos.csv")
+
+        st.markdown("### ⏳ Prediksi Waktu Matang")
+    suhu_input = st.number_input("Suhu rata-rata", 20, 70, 50)
+    kelembapan_input = st.number_input("Kelembaban rata-rata", 0, 100, 60)
+    waktu_fermentasi_input = st.number_input("Waktu fermentasi (hari)", 1, 100, 10)
+    bahan_terpilih = st.multiselect(
+        "Jenis bahan kompos",
+        [
+            "dedaunan", "jerami", "sisa makanan", "kotoran hewan", "kertas", "karton", "kulit buah",
+            "sayur busuk", "serbuk gergaji", "ampas kopi", "ampas tebu", "nasi basi", "kulit telur",
+            "rumput liar", "ranting kecil", "batang pisang"
+        ]
+    )
+
+    if st.button("🔬 Prediksi Matang"):
+        if not bahan_terpilih:
+            st.warning("Pilih setidaknya satu bahan!")
+        else:
+            model_reg, mlb = train_regression_model(training_data)
+            hasil = predict_maturity_time(model_reg, mlb, suhu_input, kelembapan_input, waktu_fermentasi_input, bahan_terpilih)
+            st.success(f"Perkiraan total waktu matang: {hasil} hari")
+            st.info(f"Sisa waktu dari sekarang: {max(hasil - waktu_fermentasi_input, 0)} hari")
+    
+    st.divider()
+    st.subheader("📊 Klasifikasi Kondisi Kompos")
+    suhu_k = st.slider("Suhu (°C)", 0, 70, 50, key="suhu_k")
+    kelembaban_k = st.slider("Kelembaban (%)", 0, 100, 60, key="kelembaban_k")
+    gas_k = st.number_input("Kadar Gas (ppm)", 0, 5000, 800, key="gas_k")
+    durasi_k = st.number_input("Durasi Fermentasi (hari)", 0, 100, 15, key="durasi_k")
+
+    if st.button("🔍 Jalankan Klasifikasi"):
+        hasil_k = classify_condition(suhu_k, kelembaban_k, gas_k, durasi_k)
+        st.success(f"Hasil Klasifikasi: **{hasil_k}**")
+
+with tab2:
+    st.header("ℹ️ EcoSmart Composting")
+    st.markdown("""
+    **Konsep Sistem EcoSmart Composting** :
+    - EcoSmart Composting adalah sistem pemantauan kompos berbasis IoT dan AI yang dirancang untuk mengoptimalkan proses dekomposisi bahan organik. Sistem ini menggunakan sensor untuk memantau suhu dan kelembapan secara real-time, lalu mengirimkan data ke cloud untuk diolah dan dianalisis oleh model AI. AI berperan dalam memprediksi tingkat kesiapan kompos, mendeteksi kondisi tidak optimal, serta memberikan rekomendasi otomatis agar kondisi tetap ideal. Dengan metode analisis, sistem ini membantu pengguna menjaga kualitas kompos secara efisien dan minim intervensi manual.
+    
+    """)
+
+    st.markdown("""
+    Sistem **EcoSmart Composting** memiliki beberapa kegunaan utama:
+
+    1. **Pemantauan Real-time**  
+       Sistem dapat memantau parameter penting seperti suhu dan kelembapan kompos secara langsung melalui platform digital. Pemantauan real-time ini membantu memastikan proses pengomposan berjalan sesuai dengan kondisi optimal.
+
+    2. **Optimasi Proses Pengomposan**  
+       Dengan data yang dikumpulkan secara akurat, pengguna dapat menyesuaikan faktor-faktor penting seperti suhu dan kelembapan. Penyesuaian ini berperan dalam mempercepat proses dekomposisi bahan organik serta meningkatkan efisiensi pengolahan kompos.
+
+    3. **Pencegahan Kegagalan Proses**  
+       Sistem dilengkapi dengan fitur notifikasi otomatis yang akan memberikan peringatan apabila parameter lingkungan berada di luar batas optimal. Dengan ini pengguna dapat segera melakukan tindakan korektif guna menghindari kegagalan dalam proses pengomposan.
+
+    4. **Efisiensi Waktu dan Biaya**  
+       Dengan otomatisasi pemantauan dan pemberian rekomendasi berbasis data, sistem ini mengurangi kebutuhan intervensi manual, sehingga menghemat waktu dan tenaga. Di sisi lain, percepatan proses produksi juga berdampak pada efisiensi biaya operasional.
+
+    5. **Kontribusi terhadap Keberlanjutan Lingkungan**  
+       EcoSmart Composting mendukung upaya pengelolaan limbah organik secara lebih bertanggung jawab dan berkelanjutan. Dengan mengurangi limbah yang berakhir di tempat pembuangan akhir (TPA) dan menghasilkan pupuk alami yang ramah lingkungan, sistem ini mendorong penerapan prinsip *circular economy* dalam praktik pertanian dan pengelolaan sampah.
+    """)
