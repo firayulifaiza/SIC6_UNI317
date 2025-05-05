@@ -1,0 +1,218 @@
+import os
+import streamlit as st
+import pandas as pd
+import requests
+import plotly.express as px
+from datetime import datetime, date
+from streamlit_autorefresh import st_autorefresh
+from sklearn.linear_model import LinearRegression
+import numpy as np
+
+# ------------------ 1. Konfigurasi Halaman ------------------
+st.set_page_config(
+    page_title="EcoSmart Composting Dashboard",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# ------------------ 2. CSS Kustom (Putih & Hijau) ------------------
+st.markdown("""
+<style>
+/* General */
+body, .stApp {
+    background-color: #FFFFFF;
+    color: #2E7D32;
+    font-family: 'Segoe UI', sans-serif;
+}
+/* Sidebar */
+[data-testid="stSidebar"] {
+    background-color: #E8F5E9;
+    color: #2E7D32;
+}
+[data-testid="stSidebar"] .stTitle,
+[data-testid="stSidebar"] .stHeader {
+    color: #2E7D32;
+}
+[data-testid="stSidebar"] .stButton>button {
+    background-color: #A5D6A7;
+    color: #FFFFFF;
+    border-radius: 8px;
+    padding: 0.6em 1.5em;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# ------------------ 3. Sidebar & Filter ------------------
+with st.sidebar:
+    st.title("🌿 EcoSmart Composting")
+    page = st.radio("Menu", ["📊 Dashboard", "📡 Informasi tentang kompos", "ℹ️ Tentang"])
+    st.markdown("---")
+    if page == "📊 Dashboard":
+        st.header("Filter Data")
+        start_date = st.date_input("Tanggal Mulai", value=date(2025, 1, 1))
+        end_date = st.date_input("Tanggal Akhir", value=date.today())
+        smin, smax = st.slider("Suhu (°C)", 0, 100, (0, 100))
+        hmin, hmax = st.slider("Kelembapan (%)", 0, 100, (0, 100))
+        st.markdown("---")
+    st.markdown("Made with ♥ by **FIGEN CORE**")
+
+# ------------------ 5. Auto-refresh & Ambil Data ------------------
+st_autorefresh(interval=5000, limit=100, key="refresh")  # Auto-refresh every 5 seconds
+if "history" not in st.session_state:
+    st.session_state.history = []
+
+# ------------------ 7. Ambil Data dari Flask ------------------
+try:
+    # Mendapatkan data suhu dan kelembapan dari API Flask
+    flask_api_url = "http://192.168.208.118:8000/data"  # URL Flask API
+    resp = requests.get(flask_api_url, timeout=5)
+    resp.raise_for_status()  # Pastikan tidak ada error HTTP
+    sensor = resp.json()  # Ambil respons JSON dari Flask
+
+    # Ambil data suhu dan kelembapan dari respons Flask
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    t = sensor.get("temperature")
+    h = sensor.get("humidity")
+    last = st.session_state.history[-1] if st.session_state.history else None
+
+    if t is not None and h is not None:
+        if not last or last["Suhu"] != t or last["Kelembapan"] != h:
+            st.session_state.history.append({"Waktu": now, "Suhu": t, "Kelembapan": h})
+
+except Exception as e:
+    st.error(f"⚠️ Gagal ambil data: {e}")
+
+# ------------------ 8. Dashboard ------------------
+if page == "📊 Dashboard":
+    df = pd.DataFrame(st.session_state.history)
+    if df.empty:
+        st.info("Menunggu data sensor...")
+    else:
+        df["Waktu"] = pd.to_datetime(df["Waktu"])
+        df = df.loc[
+            (df["Waktu"].dt.date >= start_date) &
+            (df["Waktu"].dt.date <= end_date) &
+            df["Suhu"].between(smin, smax) &
+            df["Kelembapan"].between(hmin, hmax)
+        ]
+        if df.empty:
+            st.warning("Tidak ada data sesuai filter.")
+        else:
+            df["Tanggal"] = df["Waktu"].dt.date
+            daily_counts = df.groupby("Tanggal").size()
+            avg_per_day = daily_counts.mean()
+
+            latest = df.iloc[-1]
+            curr_t = latest["Suhu"]
+            curr_h = latest["Kelembapan"]
+
+            is_optimal = "Optimal" if curr_t >= 20 and curr_t <= 30 and curr_h >= 40 and curr_h <= 60 else "Not Optimal"
+
+            # Display Metrics
+            cols = st.columns(4, gap="large")
+            metrics = [
+                ("📊 Rata-rata Data/Hari", f"{avg_per_day:.0f}"),
+                ("🌡️ Suhu Sekarang", f"{curr_t:.1f}°C"),
+                ("💧 Kelembapan Sekarang", f"{curr_h:.1f}%")
+            ]
+            for col, (title, val) in zip(cols, metrics):
+                with col:
+                    st.markdown('<div class="metric-card">', unsafe_allow_html=True)
+                    st.markdown(f"**{title}**")
+                    st.markdown(f"<h2>{val}</h2>", unsafe_allow_html=True)
+                    st.markdown("</div>", unsafe_allow_html=True)
+
+            # ---- Model Training Here ----
+            # Example Data: You should ideally have historical data (temperature, humidity, and days until maturity)
+            # This is a simple example, replace it with your actual data for training the model
+            X = np.array([
+                [25, 60],  # Example: [Temperature, Humidity]
+                [28, 65],
+                [22, 50],
+                [30, 55]
+            ])
+            y = np.array([10, 8, 12, 7])  # Example target: [days to compost maturity]
+
+            # Train a simple model using LinearRegression
+            model = LinearRegression()
+            model.fit(X, y)
+
+            # Predict compost maturity time based on the current temperature and humidity
+            prediction = model.predict([[curr_t, curr_h]])
+            predicted_days = prediction[0]
+            predicted_date = datetime.now() + pd.Timedelta(days=predicted_days)
+
+            st.markdown(f"### Prediksi Waktu Matang Kompos: Hari ke-{int(predicted_days)} ({predicted_date.strftime('%Y-%m-%d')})")
+
+            # Display warning if not optimal
+            if is_optimal == "Not Optimal":
+                st.warning("⚠️ Kondisi kompos tidak optimal! Perlu dilakukan tindakan.")
+
+            st.markdown("---")
+            g1, g2 = st.columns(2, gap="large")
+            with g1:
+                st.markdown('<div class="chart-card">', unsafe_allow_html=True)
+                fig1 = px.line(df, x="Waktu", y="Suhu", title="Suhu Real-Time")
+                fig1.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=250)
+                st.plotly_chart(fig1, use_container_width=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+            with g2:
+                st.markdown('<div class="chart-card">', unsafe_allow_html=True)
+                fig2 = px.line(df, x="Waktu", y="Kelembapan", title="Kelembapan Real-Time")
+                fig2.update_layout(margin=dict(l=0, r=0, t=30, b=0), height=250)
+                st.plotly_chart(fig2, use_container_width=True)
+                st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown("---")
+
+            st.markdown('<div class="table-card">', unsafe_allow_html=True)
+            st.subheader("📄 Riwayat Data")
+            st.dataframe(df, use_container_width=True)
+            st.download_button("⬇️ Unduh CSV", df.to_csv(index=False), "riwayat_kompos.csv")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+# ------------------ 9. Monitoring ------------------
+elif page == "📡 Monitoring":
+    st.header("Informasi Komposting")
+    st.markdown(""" 
+    ### Bagaimana cara membuat kompos yang benar?
+    - Kompos harus disusun dengan lapisan bahan hijau dan bahan coklat (misalnya daun, rumput, atau limbah sayur).
+    - Pastikan kompos diberi kelembapan yang cukup, tidak terlalu basah atau kering.
+    - Posisikan kompos di tempat yang terkena sinar matahari dan pastikan ada sirkulasi udara yang baik.
+
+    ### Tips agar waktu kompos lebih efisien:
+    - Cacah bahan-bahan kompos menjadi potongan kecil untuk mempercepat proses dekomposisi.
+    - Gunakan aerasi untuk mempercepat penguraian bahan organik.
+    
+    ### Bahan-bahan yang bisa digunakan untuk kompos:
+    - Bahan hijau: limbah sayuran, kotoran hewan, rumput.
+    - Bahan coklat: daun kering, serbuk gergaji, jerami.
+    - Hindari bahan yang mengandung minyak atau bahan kimia.
+    """)
+    
+# ------------------ 10. Tentang ------------------
+else:
+    st.header("ℹ️ EcoSmart Composting")
+    st.markdown("""
+    **Konsep Sistem EcoSmart Composting** :
+    - EcoSmart Composting adalah sistem pemantauan kompos berbasis IoT dan AI yang dirancang untuk mengoptimalkan proses dekomposisi bahan organik. Sistem ini menggunakan sensor untuk memantau suhu dan kelembapan secara real-time, lalu mengirimkan data ke cloud untuk diolah dan dianalisis oleh model AI. AI berperan dalam memprediksi tingkat kesiapan kompos, mendeteksi kondisi tidak optimal, serta memberikan rekomendasi otomatis agar kondisi tetap ideal. Dengan metode analisis, sistem ini membantu pengguna menjaga kualitas kompos secara efisien dan minim intervensi manual.
+    
+    """)
+
+    st.markdown("""
+    Sistem **EcoSmart Composting** memiliki beberapa kegunaan utama:
+
+    1. **Pemantauan Real-time**  
+       Sistem dapat memantau parameter penting seperti suhu dan kelembapan kompos secara langsung melalui platform digital. Pemantauan real-time ini membantu memastikan proses pengomposan berjalan sesuai dengan kondisi optimal.
+
+    2. **Optimasi Proses Pengomposan**  
+       Dengan data yang dikumpulkan secara akurat, pengguna dapat menyesuaikan faktor-faktor penting seperti suhu dan kelembapan. Penyesuaian ini berperan dalam mempercepat proses dekomposisi bahan organik serta meningkatkan efisiensi pengolahan kompos.
+
+    3. **Pencegahan Kegagalan Proses**  
+       Sistem dilengkapi dengan fitur notifikasi otomatis yang akan memberikan peringatan apabila parameter lingkungan berada di luar batas optimal. Dengan ini pengguna dapat segera melakukan tindakan korektif guna menghindari kegagalan dalam proses pengomposan.
+
+    4. **Efisiensi Waktu dan Biaya**  
+       Dengan otomatisasi pemantauan dan pemberian rekomendasi berbasis data, sistem ini mengurangi kebutuhan intervensi manual, sehingga menghemat waktu dan tenaga. Di sisi lain, percepatan proses produksi juga berdampak pada efisiensi biaya operasional.
+
+    5. **Kontribusi terhadap Keberlanjutan Lingkungan**  
+       EcoSmart Composting mendukung upaya pengelolaan limbah organik secara lebih bertanggung jawab dan berkelanjutan. Dengan mengurangi limbah yang berakhir di tempat pembuangan akhir (TPA) dan menghasilkan pupuk alami yang ramah lingkungan, sistem ini mendorong penerapan prinsip *circular economy* dalam praktik pertanian dan pengelolaan sampah.
+    """)
