@@ -4,4 +4,4 @@ requests
 matplotlib
 plotly
 scikit-learn
-streamlit_autorefresh'
+streamlit_autorefresh
